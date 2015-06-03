@@ -25,6 +25,7 @@
 
 #define MAX_LINE_LEN 512
 
+extern int g_cache_timeout;
 static char *pop_token(char **line)
 {
 	char *end, *token;
@@ -246,7 +247,7 @@ int parse_conf_file(const char *file)
 		char *group  = NULL;
 		int   op = 0, num = 0;
 		char *dest[32];
-
+		int   lifetime = 0;	
 		while ((token = pop_token(&line))) {
 			/* Strip comments. */
 			if (match ("#", token)) {
@@ -261,26 +262,41 @@ int parse_conf_file(const char *file)
 					op = 1;
 				} else if (match ("mroute", token)) {
 					op = 2;
+				} else if (match ("cache_lifetime", token)) {
+					op = 3;
 				} else {
 #ifdef UNITTEST
-					printf("%02d: Unknonw command: %s", lineno, line);
+					printf("%02d: Unknown command: %s", lineno, line);
 #else
 					smclog(LOG_WARNING, 0, "%02d: Unknown command %s, skipping.", lineno, token);
 #endif
 					continue;
 				}
 			}
+			if ((op == 1) || (op == 2)) {
+				if (match("from", token)) {
+					ifname = pop_token(&line);
+				} else if (match("source", token)) {
+					source = pop_token(&line);
+				} else if (match("group", token)) {
+					group = pop_token(&line);
+				} else if (match("to", token)) {
+					while ((dest[num] = pop_token(&line)))
+						num++;
+				}
+			} else if (op == 3) {
+				lifetime = atoi(token);
+#ifdef UNITEST
+				printf("%02d: Cache_timeout = %d\n", lineno, lifetime);
+#endif
+				if (lifetime <= 0) {
+					smclog(LOG_WARNING, 0, "%02d: Can't evaluate cache_timeout value: %s , skipping.", lineno, token);
+					lifetime = 0;
+				}
 
-			if (match("from", token)) {
-				ifname = pop_token(&line);
-			} else if (match("source", token)) {
-				source = pop_token(&line);
-			} else if (match("group", token)) {
-				group = pop_token(&line);
-			} else if (match("to", token)) {
-				while ((dest[num] = pop_token(&line)))
-					num++;
+				g_cache_timeout = lifetime;
 			}
+
 		}
 
 #ifdef UNITTEST

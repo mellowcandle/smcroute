@@ -34,14 +34,15 @@
 
 #include <signal.h>
 #include <unistd.h>
-
+#include <sys/timerfd.h>
+#include <time.h>
 #include "mclab.h"
 
 #define SMCROUTE_SYSTEM_CONF "/etc/smcroute.conf"
-
 int do_debug_logging = 0;
 
-static int         running   = 1;
+static int		running   = 1;
+int				g_cache_timeout = 0;
 static const char *conf_file = SMCROUTE_SYSTEM_CONF;
 
 extern char *__progname;
@@ -349,22 +350,34 @@ static void signal_init(void)
 	sigaction(SIGINT, &sa, NULL);
 }
 
-static void server_loop(int sd)
+static void server_loop(int sd, int timer_fd)
 {
 	fd_set fds;
 #ifdef HAVE_IPV6_MULTICAST_ROUTING
-	int max_fd_num = MAX(sd, MAX(mroute4_socket, mroute6_socket));
+	int max_fd_num = (MAX(timer_fd, MAX(sd, MAX(mroute4_socket, mroute6_socket))));
 #else
-	int max_fd_num = MAX(sd, mroute4_socket);
+	int max_fd_num = (MAX(timer_fd, MAX(sd, mroute4_socket));
 #endif
+	struct itimerspec new_value;
+	struct timespec now;
 
+	if (g_cache_timeout) {
+		if (clock_gettime(CLOCK_REALTIME, &now) == -1) {
+			smclog(LOG_ERR, errno, " clock_gettime failure");
+		}
+		new_value.it_value.tv_sec = now.tv_sec + g_cache_timeout;
+		new_value.it_value.tv_nsec = now.tv_nsec;
+		
+		if (timerfd_settime(timer_fd, TFD_TIMER_ABSTIME, &new_value, NULL) == -1)
+			smclog(LOG_ERR, errno, " timerfd_settime failure");
+	}
 	/* Watch the MRouter and the IPC socket to the smcroute client */
 	while (running) {
 		int result;
-
 		FD_ZERO(&fds);
 		FD_SET(sd, &fds);
 		FD_SET(mroute4_socket, &fds);
+		FD_SET(timer_fd, &fds);
 #ifdef HAVE_IPV6_MULTICAST_ROUTING
 		if (-1 != mroute6_socket)
 			FD_SET(mroute6_socket, &fds);
@@ -390,6 +403,25 @@ static void server_loop(int sd)
 		/* loop back to select if there is no smcroute command */
 		if (FD_ISSET(sd, &fds))
 			read_ipc_command();
+
+		if (FD_ISSET(timer_fd, &fds)) {
+
+			smclog(LOG_WARNING, 0, " cache_lifetime timeout ocurred");
+		
+		/* Let's purge all our dynamic routes now... */
+			mroute4_dyn_cache_delete();
+
+			if (clock_gettime(CLOCK_REALTIME, &now) == -1) {
+				smclog(LOG_ERR, errno, " clock_gettime failure");
+				continue;
+			}
+			new_value.it_value.tv_sec = now.tv_sec + g_cache_timeout;
+			new_value.it_value.tv_nsec = now.tv_nsec;
+			
+			if (timerfd_settime(timer_fd, TFD_TIMER_ABSTIME, &new_value, NULL) == -1)
+				smclog(LOG_ERR, errno, " timerfd_settime failure");
+
+		}
 	}
 }
 
@@ -397,7 +429,7 @@ static void server_loop(int sd)
  * error code in the parent and the initscript will fail */
 static void start_server(int background)
 {
-	int sd, api = 0, busy = 0;
+	int sd,timer_fd, api = 0, busy = 0;
 
 	if (background && daemonize())
 		return;
@@ -436,6 +468,10 @@ static void start_server(int background)
 	if (sd < 0)
 		smclog(LOG_WARNING, errno, "Failed setting up IPC socket, client communication disabled");
 
+	timer_fd = timerfd_create(CLOCK_REALTIME, 0);
+	if (timer_fd == -1)
+		smclog(LOG_ERR, errno, "Failed setting resert cache_lifetime timer");
+
 	atexit(clean);
 	signal_init();
 	read_conf_file(conf_file);
@@ -444,7 +480,7 @@ static void start_server(int background)
 	if (pidfile(NULL))
 		smclog(LOG_WARNING, errno, "Failed creating pidfile");
 
-	server_loop(sd);
+	server_loop(sd, timer_fd);
 }
 
 static int usage(void)
